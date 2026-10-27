@@ -1,0 +1,189 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <math.h>
+
+const char* ssid = "Microwave_Scanner";
+const char* password = "scan12345";
+
+WebServer server(80);
+
+const float refFreq = 6.948;
+const float refS11 = -23.67196;
+const float threshold = 200.0;
+
+String result = "Upload a file to start the scan.";
+
+void handleHome() {
+  String page = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<title>Microwave Scanner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body {
+  font-family: Arial;
+  max-width: 600px;
+  margin: 40px auto;
+  padding: 20px;
+  background: #f4f4f4;
+}
+.box {
+  background: white;
+  padding: 25px;
+  border-radius: 10px;
+}
+button {
+  padding: 10px 18px;
+  margin-top: 15px;
+  cursor: pointer;
+}
+#output {
+  margin-top: 20px;
+  white-space: pre-line;
+}
+</style>
+</head>
+<body>
+<div class="box">
+<h2>Microwave Measurement Scanner</h2>
+<p>Select your measurement .txt file</p>
+<input type="file" id="file" accept=".txt">
+<br>
+<button onclick="scanFile()">Compare Data</button>
+<div id="output"></div>
+</div>
+
+<script>
+async function scanFile() {
+  const file = document.getElementById("file").files[0];
+  const output = document.getElementById("output");
+
+  if (!file) {
+    output.innerText = "Please select a file.";
+    return;
+  }
+
+  output.innerText = "Reading file...";
+
+  try {
+    const text = await file.text();
+    const lines = text.split(/\r?\n/);
+    let data = [];
+
+    for (const line of lines) {
+      const s = line.trim();
+
+      if (!s || s.startsWith("#")) continue;
+
+      const values = s.split(/[\s,;]+/);
+      const freq = Number(values[0]);
+      const s11 = Number(values[1]);
+
+      if (Number.isFinite(freq) && Number.isFinite(s11)) {
+        data.push({freq, s11});
+      }
+    }
+
+    if (data.length === 0) {
+      output.innerText = "No valid measurement data found.";
+      return;
+    }
+
+    let lowest = data[0];
+
+    for (const point of data) {
+      if (point.s11 < lowest.s11) {
+        lowest = point;
+      }
+    }
+
+    const response = await fetch("/compare", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: "freq=" + encodeURIComponent(lowest.freq) +
+            "&s11=" + encodeURIComponent(lowest.s11) +
+            "&rows=" + encodeURIComponent(data.length)
+    });
+
+    output.innerText = await response.text();
+
+  } catch (error) {
+    output.innerText = "Could not read or compare the file.";
+  }
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
+  server.send(200, "text/html", page);
+}
+
+void handleCompare() {
+  if (!server.hasArg("freq") || !server.hasArg("s11")) {
+    server.send(400, "text/plain", "Measurement data is missing.");
+    return;
+  }
+
+  float measuredFreq = server.arg("freq").toFloat();
+  float measuredS11 = server.arg("s11").toFloat();
+  int rows = server.arg("rows").toInt();
+
+  float freqChange = fabs(measuredFreq - refFreq) * 1000.0;
+  float gamma = pow(10.0, measuredS11 / 20.0);
+  float s11Change = fabs(measuredS11 - refS11);
+
+  Serial.println("\n--- Scan Result ---");
+  Serial.printf("Data points: %d\n", rows);
+  Serial.printf("Reference frequency: %.3f GHz\n", refFreq);
+  Serial.printf("Measured frequency: %.3f GHz\n", measuredFreq);
+  Serial.printf("Frequency variation: %.2f MHz\n", freqChange);
+  Serial.printf("Measured S11: %.3f dB\n", measuredS11);
+  Serial.printf("Reference S11: %.3f dB\n", refS11);
+  Serial.printf("S11 difference: %.3f dB\n", s11Change);
+  Serial.printf("Reflection coefficient magnitude: %.5f\n", gamma);
+
+  if (freqChange > threshold) {
+    result = "Frequency variation is above 200 MHz.\nFurther verification is required.";
+  } else {
+    result = "Frequency variation is within 200 MHz.\nFurther verification is still required.";
+  }
+
+  String response = "Scan Result\n\n";
+  response += "Data points: " + String(rows) + "\n";
+  response += "Reference frequency: " + String(refFreq, 3) + " GHz\n";
+  response += "Measured frequency: " + String(measuredFreq, 3) + " GHz\n";
+  response += "Frequency variation: " + String(freqChange, 2) + " MHz\n";
+  response += "Measured S11: " + String(measuredS11, 3) + " dB\n";
+  response += "Reference S11: " + String(refS11, 3) + " dB\n";
+  response += "S11 difference: " + String(s11Change, 3) + " dB\n";
+  response += "Reflection coefficient magnitude: " + String(gamma, 5) + "\n\n";
+  response += result;
+
+  Serial.println(result);
+  server.send(200, "text/plain", response);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  WiFi.softAP(ssid, password);
+
+  Serial.println("Microwave Scanner Started");
+  Serial.print("Connect to Wi-Fi: ");
+  Serial.println(ssid);
+  Serial.print("Open this address: ");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", HTTP_GET, handleHome);
+  server.on("/compare", HTTP_POST, handleCompare);
+
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
